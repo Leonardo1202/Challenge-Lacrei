@@ -1,0 +1,10 @@
+variable "project"              { type = string }
+variable "environment"          { type = string }
+variable "instance_type"        { type = string }
+variable "ami_id"               { type = string }
+variable "subnet_id"            { type = string }
+variable "vpc_id"               { type = string }
+variable "iam_instance_profile" { type = string }
+variable "aws_region"           { type = string }
+variable "allowed_origins"      { type = string }
+variable "ecr_registry"         { type = string }
