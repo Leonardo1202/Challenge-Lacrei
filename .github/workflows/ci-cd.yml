@@ -3,64 +3,48 @@ name: CI/CD Pipeline
 on:
   push:
     branches: [main]
-    tags:     ['v*.*.*']
   pull_request:
     branches: [main]
 
-# Prevent concurrent deploys to the same environment
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
 
 env:
   AWS_REGION:   ${{ vars.AWS_REGION }}
-  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}   # e.g. 123456789.dkr.ecr.us-east-1.amazonaws.com
-  ECR_REPO:     ${{ vars.ECR_REPO }}        # e.g. lacrei-status-api
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+  ECR_REPO:     ${{ vars.ECR_REPO }}
 
 permissions:
-  id-token: write   # Required for OIDC → no long-lived AWS keys
+  id-token: write
   contents: read
 
-# ─────────────────────────────────────────────────────────────────────────────
 jobs:
 
-  # ── 1. BUILD & TEST ──────────────────────────────────────────────────────
   build:
     name: Build & Test
     runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.meta.outputs.image_tag }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set image tag
         id: meta
         run: |
           SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            TAG="${{ github.ref_name }}"
-          else
-            TAG="sha-${SHA_SHORT}"
-          fi
-          echo "image_tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "📦 Image tag: ${TAG}"
-
+          echo "image_tag=sha-${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "Image tag: sha-${SHA_SHORT}"
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region:     ${{ env.AWS_REGION }}
-
       - name: Login to Amazon ECR
-        id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: Build & test + push runtime image
+      - name: Build & push runtime image
         uses: docker/build-push-action@v5
         with:
           context:    .
@@ -71,31 +55,16 @@ jobs:
             ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:latest
           build-args: |
             APP_VERSION=${{ steps.meta.outputs.image_tag }}
-
       - name: Validate container health
         run: |
           IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ steps.meta.outputs.image_tag }}"
-          echo "▶ Starting container smoke test…"
-          docker run -d --name smoke \
-            -e NODE_ENV=production \
-            -e APP_VERSION=${{ steps.meta.outputs.image_tag }} \
-            -p 3000:3000 "$IMAGE"
-
-          # Wait for healthcheck to pass (max 30s)
-          for i in $(seq 1 10); do
-            STATUS=$(docker inspect --format='{{.State.Health.Status}}' smoke 2>/dev/null || echo "starting")
-            echo "  attempt $i/10 — status: $STATUS"
-            [[ "$STATUS" == "healthy" ]] && break
-            sleep 3
-          done
-
+          docker run -d --name smoke -e NODE_ENV=test -p 3000:3000 "$IMAGE"
+          sleep 5
           RESPONSE=$(curl -sf http://localhost:3000/status)
-          echo "✅ /status response: $RESPONSE"
+          echo "✅ /status: $RESPONSE"
           echo "$RESPONSE" | grep -q '"status":"ok"'
-
           docker stop smoke && docker rm smoke
 
-  # ── 2. DEPLOY STAGING ────────────────────────────────────────────────────
   deploy-staging:
     name: Deploy → Staging
     needs: build
@@ -104,20 +73,16 @@ jobs:
     environment:
       name: staging
       url:  ${{ vars.STAGING_URL }}
-
     steps:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region:     ${{ env.AWS_REGION }}
-
-      - name: Deploy to Staging EC2 via SSM
+      - name: Deploy to Staging via SSM
         run: |
           IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ needs.build.outputs.image_tag }}"
-          echo "🚀 Deploying $IMAGE to STAGING"
-
-          aws ssm send-command \
+          CMD_ID=$(aws ssm send-command \
             --instance-ids "${{ secrets.EC2_INSTANCE_ID_STAGING }}" \
             --document-name "AWS-RunShellScript" \
             --parameters "commands=[
@@ -129,66 +94,51 @@ jobs:
               'docker run -d --name lacrei-app --restart unless-stopped -p 3000:3000 -e NODE_ENV=staging -e APP_VERSION=${{ needs.build.outputs.image_tag }} $IMAGE',
               'docker image prune -f'
             ]" \
-            --comment "Deploy ${{ needs.build.outputs.image_tag }} to staging" \
-            --output text \
-            --query "Command.CommandId" > /tmp/cmd_id.txt
-
-          CMD_ID=$(cat /tmp/cmd_id.txt)
-          echo "SSM Command ID: $CMD_ID"
-
+            --output text --query "Command.CommandId")
           for i in $(seq 1 30); do
             STATUS=$(aws ssm get-command-invocation \
               --command-id "$CMD_ID" \
               --instance-id "${{ secrets.EC2_INSTANCE_ID_STAGING }}" \
               --query "Status" --output text 2>/dev/null || echo "Pending")
-            echo "  attempt $i/30 — $STATUS"
+            echo "  attempt $i/30 - $STATUS"
             [[ "$STATUS" == "Success" ]] && break
-            [[ "$STATUS" == "Failed"  ]] && echo "❌ SSM command failed" && exit 1
+            [[ "$STATUS" == "Failed"  ]] && exit 1
             sleep 10
           done
-
       - name: Smoke test staging
         run: |
-          sleep 5
+          sleep 10
           RESPONSE=$(curl -sf "${{ vars.STAGING_URL }}/status")
-          echo "✅ Staging /status: $RESPONSE"
           echo "$RESPONSE" | grep -q '"status":"ok"'
 
-  # ── 3. DEPLOY PRODUCTION ─────────────────────────────────────────────────
   deploy-production:
     name: Deploy → Production
     needs: [build, deploy-staging]
     runs-on: ubuntu-latest
-    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment:
       name: production
       url:  ${{ vars.PROD_URL }}
-
     steps:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region:     ${{ env.AWS_REGION }}
-
       - name: Tag image as stable
         run: |
           MANIFEST=$(aws ecr batch-get-image \
             --repository-name "${{ env.ECR_REPO }}" \
             --image-ids imageTag=${{ needs.build.outputs.image_tag }} \
             --query 'images[0].imageManifest' --output text)
-
           aws ecr put-image \
             --repository-name "${{ env.ECR_REPO }}" \
             --image-tag stable \
             --image-manifest "$MANIFEST"
-
-      - name: Deploy to Production EC2 via SSM
+      - name: Deploy to Production via SSM
         run: |
           IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ needs.build.outputs.image_tag }}"
-          echo "🚀 Deploying $IMAGE to PRODUCTION"
-
-          aws ssm send-command \
+          CMD_ID=$(aws ssm send-command \
             --instance-ids "${{ secrets.EC2_INSTANCE_ID_PROD }}" \
             --document-name "AWS-RunShellScript" \
             --parameters "commands=[
@@ -200,44 +150,38 @@ jobs:
               'docker run -d --name lacrei-app --restart unless-stopped -p 3000:3000 -e NODE_ENV=production -e APP_VERSION=${{ needs.build.outputs.image_tag }} $IMAGE',
               'docker image prune -f'
             ]" \
-            --comment "Deploy ${{ needs.build.outputs.image_tag }} to production" \
-            --output text \
-            --query "Command.CommandId" > /tmp/cmd_id.txt
-
-          CMD_ID=$(cat /tmp/cmd_id.txt)
-
+            --output text --query "Command.CommandId")
           for i in $(seq 1 30); do
             STATUS=$(aws ssm get-command-invocation \
               --command-id "$CMD_ID" \
               --instance-id "${{ secrets.EC2_INSTANCE_ID_PROD }}" \
               --query "Status" --output text 2>/dev/null || echo "Pending")
-            echo "  attempt $i/30 — $STATUS"
+            echo "  attempt $i/30 - $STATUS"
             [[ "$STATUS" == "Success" ]] && break
-            [[ "$STATUS" == "Failed"  ]] && echo "❌ SSM command failed" && exit 1
+            [[ "$STATUS" == "Failed"  ]] && exit 1
             sleep 10
           done
-
       - name: Smoke test production
         run: |
-          sleep 5
+          sleep 10
           RESPONSE=$(curl -sf "${{ vars.PROD_URL }}/status")
-          echo "✅ Production /status: $RESPONSE"
           echo "$RESPONSE" | grep -q '"status":"ok"'
 
-  # ── 4. NOTIFY on failure ─────────────────────────────────────────────────
   notify-failure:
     name: Notify on failure
     needs: [build, deploy-staging, deploy-production]
     runs-on: ubuntu-latest
     if: failure()
     steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region:     ${{ vars.AWS_REGION }}
       - name: Send SNS alert
         run: |
           aws sns publish \
             --topic-arn "${{ secrets.SNS_ALERT_TOPIC_ARN }}" \
-            --subject "❌ Deploy FAILED — ${{ github.ref_name }}" \
-            --message "Pipeline failed for commit ${{ github.sha }} on ${{ github.ref }}. Actor: ${{ github.actor }}. See: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-        env:
-          AWS_REGION:            ${{ env.AWS_REGION }}
-          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            --subject "Deploy FAILED - ${{ github.ref_name }}" \
+            --message "Pipeline failed for commit ${{ github.sha }}. Actor: ${{ github.actor }}. See: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --region ${{ vars.AWS_REGION }}
