@@ -185,3 +185,5 @@ jobs:
             --subject "Deploy FAILED - ${{ github.ref_name }}" \
             --message "Pipeline failed for commit ${{ github.sha }}. Actor: ${{ github.actor }}. See: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --region ${{ vars.AWS_REGION }}
+
+# trigger 1772730254
