@@ -172,7 +172,7 @@ jobs:
     name: Notify on failure
     needs: [build, deploy-staging, deploy-production]
     runs-on: ubuntu-latest
-    if: failure()
+    if: always() && failure()
     steps:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
