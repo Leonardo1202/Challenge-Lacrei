@@ -60,16 +60,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build image (includes test stage)
-        uses: docker/build-push-action@v5
-        with:
-          context:    .
-          target:     test
-          cache-from: type=gha
-          cache-to:   type=gha,mode=max
-          push:       false
-
-      - name: Build & push runtime image
+      - name: Build & test + push runtime image
         uses: docker/build-push-action@v5
         with:
           context:    .
@@ -78,7 +69,6 @@ jobs:
           tags: |
             ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ steps.meta.outputs.image_tag }}
             ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:latest
-          cache-from: type=gha
           build-args: |
             APP_VERSION=${{ steps.meta.outputs.image_tag }}
 
