@@ -1,259 +1,154 @@
 # Challenge-Lacrei
-Challenge Tech Lacrei health
 
 
-# lacrei-devops-challenge
 
-Pipeline de deploy seguro, escalável e eficiente para a Lacrei Saúde.  
-Ambientes de **staging** e **produção** na AWS, com Docker, GitHub Actions e EC2.
+# Lacrei Saúde — DevOps Challenge
+
+Pipeline de deploy seguro, escalável e eficiente para ambientes de staging e produção na AWS.
 
 ---
 
-## Índice
+## 📋 Índice
 
-1. [Arquitetura](#arquitetura)
-2. [Estrutura do repositório](#estrutura-do-repositório)
-3. [Setup dos ambientes AWS](#setup-dos-ambientes-aws)
-4. [Fluxo CI/CD](#fluxo-cicd)
-5. [Segurança](#segurança)
-6. [Observabilidade](#observabilidade)
-7. [Rollback](#rollback)
-8. [Integração Asaas (proposta)](#integração-asaas)
-9. [Checklist de segurança](#checklist-de-segurança)
-10. [Erros encontrados e decisões técnicas](#erros-encontrados-e-decisões-técnicas)
+- [Visão Geral](#visão-geral)
+- [Arquitetura](#arquitetura)
+- [Setup dos Ambientes](#setup-dos-ambientes)
+- [Fluxo CI/CD](#fluxo-cicd)
+- [Segurança](#segurança)
+- [Observabilidade](#observabilidade)
+- [Rollback](#rollback)
+- [Erros Encontrados e Decisões](#erros-encontrados-e-decisões)
+- [Checklist de Segurança](#checklist-de-segurança)
+- [Proposta de Integração Asaas](#proposta-de-integração-asaas)
+
+---
+
+## Visão Geral
+
+| Item | Detalhe |
+|---|---|
+| **Aplicação** | API Node.js com rotas `/status` e `/health` |
+| **Containerização** | Docker multi-stage (test → runtime) |
+| **CI/CD** | GitHub Actions com OIDC (sem chaves permanentes) |
+| **Infra** | Terraform modular — 6 módulos, 36 recursos AWS |
+| **Staging** | `https://staging.cloudfy.solutions` — EC2 t3.micro |
+| **Produção** | `https://api.cloudfy.solutions` — EC2 t3.small |
 
 ---
 
 ## Arquitetura
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        GitHub                               │
-│                                                             │
-│  push → main ──────────────────────► Deploy STAGING        │
-│  git tag v*.*.* ───────────────────► Deploy PRODUCTION      │
-│                                                             │
-│  GitHub Actions (OIDC → IAM Role, sem chaves permanentes)  │
-└──────────────┬──────────────────────────────────────────────┘
-               │  docker push
-               ▼
-┌──────────────────────┐
-│   Amazon ECR         │  Imagens privadas
-│   lacrei-status-api  │  Tags: sha-<short>, v*.*.*, latest, stable
-└──────────┬───────────┘
-           │  SSM Run Command (sem SSH aberto)
-    ┌──────┴──────────────────────────────────┐
-    │                                         │
-    ▼                                         ▼
-┌─────────────────────┐           ┌─────────────────────┐
-│  EC2 STAGING        │           │  EC2 PRODUCTION      │
-│  t3.micro           │           │  t3.small            │
-│                     │           │                      │
-│  Nginx (HTTPS/TLS)  │           │  Nginx (HTTPS/TLS)   │
-│  └─► Docker         │           │  └─► Docker          │
-│      └─► Node.js    │           │      └─► Node.js     │
-│                     │           │                      │
-│  CloudWatch Logs    │           │  CloudWatch Logs     │
-│  CloudWatch Metrics │           │  CloudWatch Metrics  │
-└─────────────────────┘           └──────────────────────┘
-           │                                 │
-           └──────────────┬──────────────────┘
-                          ▼
-              ┌───────────────────────┐
-              │  CloudWatch Alarms    │
-              │  └─► SNS → e-mail     │
-              └───────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                        GitHub Actions                           │
+│                                                                 │
+│  push main ──► Build & Test ──► Deploy Staging                  │
+│  tag v*.*.* ──► Build & Test ──► Deploy Production              │
+└────────────────────────┬────────────────────────────────────────┘
+                         │ OIDC (sem chaves)
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                          AWS                                    │
+│                                                                 │
+│  ECR ──► SSM SendCommand ──► EC2 Staging  (98.87.216.68)        │
+│                         └──► EC2 Produção (34.232.41.246)       │
+│                                                                 │
+│  CloudWatch Logs ◄── Docker (awslogs driver)                    │
+│  CloudWatch Alarms ──► SNS ──► leolima.custodio@hotmail.com     │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-**Decisões de arquitetura:**
+### Recursos AWS criados via Terraform
 
-| Decisão | Alternativa descartada | Motivo |
-|---|---|---|
-| ECR em vez de DockerHub | DockerHub público | Dados sensíveis — repositório privado dentro da própria conta AWS |
-| GitHub OIDC em vez de IAM User | Access key no GitHub Secret | Sem credenciais de longa duração; token expira por execução |
-| SSM Run Command em vez de SSH | SSH direto | Sem porta 22 aberta; auditoria nativa via CloudTrail |
-| Nginx como reverse proxy | Porta 3000 exposta diretamente | TLS, headers de segurança e rate-limit centralizados |
-| Multi-stage Dockerfile (deps → test → runtime) | Imagem única | Testes rodam no build; imagem final é mínima (sem devDeps) |
+| Módulo | Recursos |
+|---|---|
+| **VPC** | VPC 10.0.0.0/16, subnet pública, IGW, route table |
+| **EC2** | 2 instâncias + Elastic IP + Security Groups |
+| **ECR** | Repositório privado + lifecycle policy |
+| **IAM** | GitHub OIDC role + EC2 role + instance profile |
+| **CloudWatch** | 6 log groups + 6 alarmes |
+| **SNS** | Tópico de alertas + subscription email |
 
 ---
 
-## Estrutura do repositório
-
-```
-lacrei-devops-challenge/
-├── app/
-│   ├── index.js            # API Node.js (/status, /health)
-│   ├── package.json
-│   └── test/
-│       └── status.test.js  # Testes com Node.js test runner nativo
-├── .github/
-│   └── workflows/
-│       └── ci-cd.yml       # Pipeline completo
-├── infra/
-│   └── scripts/
-│       ├── ec2-userdata.sh # Bootstrap EC2 (Docker, Nginx, CWAgent, SSM)
-│       └── rollback.sh     # Script de rollback manual
-├── nginx/
-│   └── lacrei-app.conf     # Config Nginx (HTTPS + proxy)
-├── Dockerfile              # Multi-stage: deps → test → runtime
-├── .dockerignore
-├── .gitignore
-└── README.md
-```
-
----
-
-## Setup dos ambientes AWS
+## Setup dos Ambientes
 
 ### Pré-requisitos
 
-- AWS CLI configurada (`aws configure`)
-- Conta com permissões para EC2, ECR, IAM, SSM, CloudWatch, SNS
+- AWS CLI configurado (`aws sts get-caller-identity`)
+- Terraform >= 1.7
+- Git
 
-### 1. Criar repositório ECR
+### 1. Clonar o repositório
 
 ```bash
-aws ecr create-repository \
-  --repository-name lacrei-status-api \
-  --image-scanning-configuration scanOnPush=true \
-  --region us-east-1
+git clone https://github.com/Leonardo1202/Challenge-Lacrei.git
+cd Challenge-Lacrei
 ```
 
-### 2. Criar IAM Role para as EC2s
-
-A role deve ter as seguintes políticas:
-- `AmazonEC2ContainerRegistryReadOnly` — pull de imagens do ECR
-- `CloudWatchAgentServerPolicy` — envio de logs e métricas
-- `AmazonSSMManagedInstanceCore` — permite SSM Run Command (sem SSH)
+### 2. Bootstrap do state remoto
 
 ```bash
-# Criar a role
-aws iam create-role \
-  --role-name lacrei-ec2-role \
-  --assume-role-policy-document file://infra/iam/ec2-trust.json
-
-# Anexar políticas
-aws iam attach-role-policy --role-name lacrei-ec2-role \
-  --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
-aws iam attach-role-policy --role-name lacrei-ec2-role \
-  --policy-arn arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
-aws iam attach-role-policy --role-name lacrei-ec2-role \
-  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-
-# Criar instance profile e associar
-aws iam create-instance-profile --instance-profile-name lacrei-ec2-profile
-aws iam add-role-to-instance-profile \
-  --instance-profile-name lacrei-ec2-profile \
-  --role-name lacrei-ec2-role
+AWS_REGION=us-east-1 ./infra/scripts/bootstrap-state.sh
 ```
 
-### 3. Criar Security Groups
+Cria o bucket S3 (`lacrei-tfstate`) e tabela DynamoDB (`lacrei-tflock`) para o state remoto com lock.
+
+### 3. Configurar variáveis
 
 ```bash
-# Security Group para as EC2s
-aws ec2 create-security-group \
-  --group-name lacrei-app-sg \
-  --description "Lacrei app — HTTPS only inbound"
-
-SG_ID=$(aws ec2 describe-security-groups \
-  --filters Name=group-name,Values=lacrei-app-sg \
-  --query 'SecurityGroups[0].GroupId' --output text)
-
-# Apenas HTTPS (443) e HTTP (80 para redirect) de qualquer origem
-aws ec2 authorize-security-group-ingress --group-id $SG_ID \
-  --protocol tcp --port 443 --cidr 0.0.0.0/0
-aws ec2 authorize-security-group-ingress --group-id $SG_ID \
-  --protocol tcp --port 80  --cidr 0.0.0.0/0
-
-# SSH BLOQUEADO — acesso via SSM apenas
-# Porta 3000 NÃO exposta externamente — apenas Nginx acessa internamente
+cd infra/terraform
+cp terraform.tfvars.example terraform.tfvars
+# Editar: alert_email e github_org
 ```
 
-### 4. Lançar as EC2s
+### 4. Provisionar infraestrutura
 
 ```bash
-# Substitua: AMI_ID (Ubuntu 22.04 LTS), KEY_NAME, SG_ID, SUBNET_ID
-
-# Staging
-aws ec2 run-instances \
-  --image-id ami-0c7217cdde317cfec \
-  --instance-type t3.micro \
-  --iam-instance-profile Name=lacrei-ec2-profile \
-  --security-group-ids $SG_ID \
-  --subnet-id SUBNET_ID \
-  --user-data file://infra/scripts/ec2-userdata.sh \
-  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=lacrei-staging},{Key=Env,Value=staging}]'
-
-# Produção
-aws ec2 run-instances \
-  --image-id ami-0c7217cdde317cfec \
-  --instance-type t3.small \
-  --iam-instance-profile Name=lacrei-ec2-profile \
-  --security-group-ids $SG_ID \
-  --subnet-id SUBNET_ID \
-  --user-data file://infra/scripts/ec2-userdata.sh \
-  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=lacrei-production},{Key=Env,Value=production}]'
+terraform init
+terraform plan -out=tfplan.out
+terraform apply tfplan.out
 ```
 
-### 5. Configurar Nginx + TLS (Certbot)
+### 5. Configurar DNS
 
-Após a EC2 estar rodando, acesse via SSM:
+Após o apply, apontar no Route 53 (ou provedor de domínio):
 
-```bash
-# Abrir sessão SSM (sem SSH!)
-aws ssm start-session --target <INSTANCE_ID>
-
-# Dentro da instância:
-sudo cp /caminho/nginx/lacrei-app.conf /etc/nginx/sites-available/lacrei-app
-sudo sed -i 's/YOUR_DOMAIN/staging.seudominio.com/g' /etc/nginx/sites-available/lacrei-app
-sudo ln -s /etc/nginx/sites-available/lacrei-app /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
-
-# Obter certificado TLS gratuito
-sudo certbot --nginx -d staging.seudominio.com --non-interactive \
-  --agree-tos --email devops@seudominio.com
+```
+staging.cloudfy.solutions  →  A  →  <staging_public_ip>
+api.cloudfy.solutions      →  A  →  <production_public_ip>
 ```
 
-### 6. Configurar GitHub Actions
-
-**Repository Variables** (não sensíveis):
-
-| Variable | Valor exemplo |
-|---|---|
-| `AWS_REGION` | `us-east-1` |
-| `ECR_REGISTRY` | `123456789.dkr.ecr.us-east-1.amazonaws.com` |
-| `ECR_REPO` | `lacrei-status-api` |
-| `STAGING_URL` | `https://staging.seudominio.com` |
-| `PROD_URL` | `https://api.seudominio.com` |
-
-**Repository Secrets** (sensíveis):
-
-| Secret | Descrição |
-|---|---|
-| `AWS_OIDC_ROLE_ARN` | ARN da IAM Role com trust no GitHub OIDC |
-| `EC2_INSTANCE_ID_STAGING` | ID da instância de staging |
-| `EC2_INSTANCE_ID_PROD` | ID da instância de produção |
-| `SNS_ALERT_TOPIC_ARN` | ARN do tópico SNS para alertas |
-
-**Configurar GitHub OIDC:**
+### 6. Configurar TLS
 
 ```bash
-# Criar OIDC Provider no IAM (uma vez por conta AWS)
-aws iam create-open-id-connect-provider \
-  --url https://token.actions.githubusercontent.com \
-  --client-id-list sts.amazonaws.com \
-  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
+export AWS_REGION=us-east-1
+export EC2_INSTANCE_ID_STAGING=<id>
+export EC2_INSTANCE_ID_PROD=<id>
 
-# Criar IAM Role para GitHub Actions
-# Trust policy: infra/iam/github-actions-trust.json
-aws iam create-role \
-  --role-name lacrei-github-actions-role \
-  --assume-role-policy-document file://infra/iam/github-actions-trust.json
+./infra/scripts/setup-tls.sh staging
+./infra/scripts/setup-tls.sh production
+```
 
-# Políticas necessárias (princípio do menor privilégio):
-# - ecr:GetAuthorizationToken + ecr:BatchGetImage + ecr:PutImage
-# - ssm:SendCommand + ssm:GetCommandInvocation
-# - sns:Publish
+### 7. Configurar GitHub
+
+**Secrets** (Settings → Secrets and variables → Actions):
+
+```
+AWS_OIDC_ROLE_ARN        = arn:aws:iam::<account>:role/lacrei-github-actions-role
+EC2_INSTANCE_ID_STAGING  = i-xxxxxxxxxxxxxxxxx
+EC2_INSTANCE_ID_PROD     = i-xxxxxxxxxxxxxxxxx
+SNS_ALERT_TOPIC_ARN      = arn:aws:sns:us-east-1:<account>:lacrei-alerts
+```
+
+**Variables**:
+
+```
+AWS_REGION    = us-east-1
+ECR_REGISTRY  = <account>.dkr.ecr.us-east-1.amazonaws.com
+ECR_REPO      = lacrei-status-api
+STAGING_URL   = https://staging.cloudfy.solutions
+PROD_URL      = https://api.cloudfy.solutions
 ```
 
 ---
@@ -261,100 +156,84 @@ aws iam create-role \
 ## Fluxo CI/CD
 
 ```
-┌─────────────┐
-│  git push   │
-│  → main     │
-└──────┬──────┘
-       │
-       ▼
-┌─────────────────────────────────────────────┐
-│  JOB: build                                 │
-│                                             │
-│  1. Checkout                                │
-│  2. OIDC → AWS (sem secrets de longa dur.)  │
-│  3. Login ECR                               │
-│  4. Docker build --target test              │  ◄─ Falha aqui = pipeline para
-│     (testes rodam dentro do build)          │
-│  5. Docker build --target runtime + push    │
-│  6. Smoke test local do container           │
-└──────────────────┬──────────────────────────┘
-                   │  needs: build
-                   ▼
-┌─────────────────────────────────────────────┐
-│  JOB: deploy-staging   (apenas branch main) │
-│                                             │
-│  1. OIDC → AWS                              │
-│  2. SSM Run Command na EC2 staging          │
-│     - docker pull                           │
-│     - docker stop/rm atual                  │
-│     - docker run nova imagem                │
-│  3. Smoke test HTTP em staging              │
-└─────────────────────────────────────────────┘
+push → main
+│
+├── Build & Test
+│   ├── Checkout
+│   ├── Configure AWS (OIDC)
+│   ├── Login ECR
+│   ├── Build imagem Docker (stage: runtime)
+│   │   └── Testes rodando dentro do build (stage: test)
+│   └── Push para ECR com tag sha-<commit>
+│
+└── Deploy → Staging
+    ├── Configure AWS (OIDC)
+    ├── SSM SendCommand → EC2 Staging
+    │   ├── aws ecr get-login-password | docker login
+    │   ├── docker pull <imagem>
+    │   ├── docker stop/rm lacrei-app
+    │   └── docker run lacrei-app
+    └── Smoke test: GET /status → {"status":"ok"}
 
-────────── Para produção, é necessário criar uma tag ──────────
 
-┌─────────────┐
-│  git tag    │
-│  v1.2.3     │
-│  git push   │
-│  --tags     │
-└──────┬──────┘
-       │
-       ▼
-  [build job]  (mesmo fluxo acima)
-       │
-       ▼
-  [deploy-staging]  (confirma que staging está saudável)
-       │
-       ▼
-┌─────────────────────────────────────────────┐
-│  JOB: deploy-production  (apenas tags v*)   │
-│  Environment: production (requer aprovação) │
-│                                             │
-│  1. Re-tag imagem como :stable no ECR       │
-│  2. SSM Run Command na EC2 produção         │
-│  3. Smoke test HTTP em produção             │
-└─────────────────────────────────────────────┘
-       │ (em caso de falha em qualquer job)
-       ▼
-┌─────────────────────────────────────────────┐
-│  JOB: notify-failure                        │
-│  SNS → e-mail/Slack com link do run         │
-└─────────────────────────────────────────────┘
+push → tag v*.*.*
+│
+└── Build & Test
+    └── Deploy → Production (mesma lógica do staging)
+        └── Smoke test: GET /status → {"status":"ok"}
+```
+
+### Testes automatizados no build
+
+```
+ok 1 - GET /status returns 200 with correct shape
+ok 2 - GET /health returns 200
+ok 3 - GET unknown route returns 404
 ```
 
 ---
 
 ## Segurança
 
-### Gerenciamento de secrets
+### GitHub OIDC — sem chaves permanentes
 
-- **GitHub OIDC**: Nenhuma chave AWS de longa duração armazenada. O token é gerado por execução e expira automaticamente.
-- **GitHub Secrets**: IDs de instância, ARNs e tópicos SNS. Nunca printados nos logs.
-- **Sem SSH**: Acesso às instâncias exclusivamente via AWS SSM Session Manager. Porta 22 nunca aberta no Security Group.
+Em vez de `AWS_ACCESS_KEY_ID` e `AWS_SECRET_ACCESS_KEY`, o pipeline usa OIDC:
 
-### TLS/HTTPS
-
-- Let's Encrypt (Certbot) com renovação automática via `cron`
-- TLSv1.2 e TLSv1.3 apenas; ciphers seguros (Mozilla Modern)
-- HSTS habilitado com `max-age=63072000` e `preload`
-- Redirect automático HTTP → HTTPS no Nginx
-
-### CORS
-
-Configurado via variável de ambiente `ALLOWED_ORIGINS` passada ao container:
-```
-ALLOWED_ORIGINS=https://staging.seudominio.com,https://seudominio.com
+```yaml
+- uses: aws-actions/configure-aws-credentials@v4
+  with:
+    role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
 ```
 
-### Princípio do menor privilégio
+Tokens temporários gerados a cada execução, sem credenciais armazenadas.
 
-| Componente | Acesso concedido |
-|---|---|
-| EC2 IAM Role | ECR read-only, CloudWatch write, SSM core |
-| GitHub Actions IAM Role | ECR push, SSM send-command, SNS publish |
-| Container Node.js | Roda como usuário não-root (`appuser`) |
-| Security Group | Apenas 80 e 443 inbound; sem porta 22; sem porta 3000 |
+### IAM — Menor privilégio
+
+A role do GitHub Actions tem permissões mínimas:
+
+- `ecr:GetAuthorizationToken` — autenticação ECR
+- `ecr:BatchCheckLayerAvailability`, `ecr:PutImage`, etc. — push de imagem
+- `ssm:SendCommand`, `ssm:GetCommandInvocation` — deploy via SSM
+- `sns:Publish` — alertas de falha
+
+### EC2 — Sem SSH exposto
+
+- Porta 22 **bloqueada** no Security Group
+- Acesso exclusivo via **AWS Systems Manager (SSM)**
+- IMDSv2 obrigatório (proteção contra SSRF)
+
+### TLS
+
+- Let's Encrypt com renovação automática a cada 3 horas (cron)
+- TLSv1.2 e TLSv1.3 apenas
+- HSTS: `max-age=63072000; includeSubDomains; preload`
+- Headers de segurança: `X-Frame-Options`, `X-Content-Type-Options`, `X-XSS-Protection`
+
+### Docker
+
+- Imagem multi-stage (build separado do runtime)
+- Container roda como usuário non-root
+- EBS criptografado (AES256)
 
 ---
 
@@ -362,167 +241,172 @@ ALLOWED_ORIGINS=https://staging.seudominio.com,https://seudominio.com
 
 ### Logs
 
-- **Docker log driver**: `awslogs` — logs do container vão direto ao CloudWatch Logs
-- **Nginx**: logs de acesso e erro no CloudWatch via CloudWatch Agent
-- **Log groups**:
-  - `/lacrei/staging/app`
-  - `/lacrei/staging/nginx-access`
-  - `/lacrei/production/app`
-  - `/lacrei/production/nginx-access`
+| Log Group | Retenção |
+|---|---|
+| `/lacrei/staging/app` | 30 dias |
+| `/lacrei/production/app` | 30 dias |
+| `/lacrei/staging/nginx-access` | 14 dias |
+| `/lacrei/staging/nginx-error` | 14 dias |
+| `/lacrei/production/nginx-access` | 14 dias |
+| `/lacrei/production/nginx-error` | 14 dias |
 
-### Métricas (CloudWatch)
+### Alarmes CloudWatch
 
-Namespace `Lacrei/staging` e `Lacrei/production`:
-- `cpu_usage_user`
-- `mem_used_percent`
-- `disk/used_percent`
+| Alarme | Threshold | Ação |
+|---|---|---|
+| CPU Staging | > 80% por 10min | SNS |
+| CPU Production | > 80% por 10min | SNS |
+| Memória Staging | > 85% por 10min | SNS |
+| Memória Production | > 85% por 10min | SNS |
+| Disco Staging | > 80% por 10min | SNS |
+| Disco Production | > 80% por 10min | SNS |
 
-### Alarmes recomendados
+### Acessar logs
 
 ```bash
-# CPU alta em produção
-aws cloudwatch put-metric-alarm \
-  --alarm-name "lacrei-prod-cpu-high" \
-  --metric-name cpu_usage_user \
-  --namespace "Lacrei/production" \
-  --statistic Average \
-  --period 300 \
-  --threshold 80 \
-  --comparison-operator GreaterThanThreshold \
-  --evaluation-periods 2 \
-  --alarm-actions <SNS_TOPIC_ARN>
+# Logs da aplicação em tempo real
+aws logs tail /lacrei/staging/app --follow --region us-east-1
 
-# Memória alta em produção
-aws cloudwatch put-metric-alarm \
-  --alarm-name "lacrei-prod-mem-high" \
-  --metric-name mem_used_percent \
-  --namespace "Lacrei/production" \
-  --statistic Average \
-  --period 300 \
-  --threshold 85 \
-  --comparison-operator GreaterThanThreshold \
-  --evaluation-periods 2 \
-  --alarm-actions <SNS_TOPIC_ARN>
+# Logs do Nginx
+aws logs tail /lacrei/staging/nginx-access --follow --region us-east-1
 ```
 
 ---
 
 ## Rollback
 
-### Estratégia: Revert de imagem Docker via tag
-
-Todas as imagens são armazenadas no ECR com tags imutáveis:
-- `sha-<7chars>` — toda build de branch
-- `v*.*.*` — toda tag de release
-- `stable` — último deploy bem-sucedido em produção
-
-### Rollback automático (via GitHub Actions)
-
-Crie uma nova tag apontando para o commit anterior:
+### Rollback automático via script
 
 ```bash
-git tag v1.2.2 <SHA_DO_COMMIT_ANTERIOR>
-git push origin v1.2.2
+# Rollback para a versão anterior no staging
+./infra/scripts/rollback.sh staging
+
+# Rollback para uma versão específica
+./infra/scripts/rollback.sh staging sha-abc1234
 ```
 
-O pipeline subirá a imagem correspondente a esse commit.
-
-### Rollback manual (script)
+### Rollback manual
 
 ```bash
-export AWS_REGION=us-east-1
-export ECR_REGISTRY=123456789.dkr.ecr.us-east-1.amazonaws.com
-export ECR_REPO=lacrei-status-api
-export EC2_INSTANCE_ID_PROD=i-0abc123def456
+# 1. Listar imagens disponíveis no ECR
+aws ecr list-images \
+  --repository-name lacrei-status-api \
+  --region us-east-1 \
+  --query 'imageIds[?imageTag!=`null`].[imageTag]' \
+  --output table
 
-# Listar imagens disponíveis
-aws ecr list-images --repository-name lacrei-status-api
-
-# Executar rollback para uma tag específica
-./infra/scripts/rollback.sh production v1.2.0
+# 2. Fazer rollback via SSM
+aws ssm send-command \
+  --instance-ids <INSTANCE_ID> \
+  --document-name "AWS-RunShellScript" \
+  --parameters "commands=[
+    'docker stop lacrei-app || true',
+    'docker rm lacrei-app || true',
+    'docker run -d --name lacrei-app --restart unless-stopped -p 3000:3000 \
+      -e NODE_ENV=staging \
+      <ECR_REGISTRY>/lacrei-status-api:<VERSION_ANTERIOR>'
+  ]"
 ```
 
-### Rollback de emergência (último estado estável)
+### Estratégia de tags ECR
 
-```bash
-./infra/scripts/rollback.sh production stable
-```
-
-> A tag `:stable` é atualizada automaticamente a cada deploy bem-sucedido em produção.
+- `sha-<commit>` — imagem de cada commit (mantidas por 10 releases)
+- `latest` — última imagem deployada
+- `stable` — última imagem promovida para produção
 
 ---
 
-## Integração Asaas
+## Erros Encontrados e Decisões
 
-### Proposta de fluxo (arquitetura)
+### 1. OIDC Provider já existia na conta
+**Erro:** `EntityAlreadyExists: Provider with url https://token.actions.githubusercontent.com already exists`  
+**Solução:** Importar o provider existente com `terraform import`.
 
-A Asaas é a plataforma de pagamentos. O fluxo proposto para split de pagamento seria:
+### 2. Caracteres especiais em descriptions IAM/EC2
+**Erro:** `ValidationError: Member must satisfy regular expression pattern`  
+**Causa:** Caracteres como `—` (em dash) e `ã` não são aceitos pela AWS API.  
+**Solução:** Substituir por `-` e remover acentos nas descriptions.
 
-```
-Cliente (app Lacrei)
-       │
-       │  POST /payments  { amount, payerId, providerId }
-       ▼
-┌──────────────────────┐
-│  lacrei-status-api   │  (ou serviço dedicado de pagamentos)
-│                      │
-│  1. Validar request  │
-│  2. Buscar dados do  │
-│     provedor         │
-│  3. Chamar Asaas API │
-└──────────┬───────────┘
-           │  POST https://api.asaas.com/v3/payments
-           │  Headers: access_token: ${{ secrets.ASAAS_API_KEY }}
-           │  Body: { customer, value, billingType, split: [{walletId, fixedValue}] }
-           ▼
-┌──────────────────────┐
-│  Asaas API           │
-│  Split automático:   │
-│  - Lacrei (taxa)     │
-│  - Profissional      │
-└──────────────────────┘
-           │  Webhook (paymentConfirmed)
-           ▼
-┌──────────────────────┐
-│  POST /webhooks/asaas│
-│  Atualiza status no  │
-│  banco interno       │
-└──────────────────────┘
-```
+### 3. Limite de VPCs atingido
+**Erro:** `VpcLimitExceeded: The maximum number of VPCs has been reached`  
+**Solução:** Deletar VPCs não utilizadas na conta. Alternativa: solicitar aumento de limite via Service Quotas.
 
-**Segurança na integração:**
-- `ASAAS_API_KEY` armazenada no AWS Secrets Manager, não no código
-- Webhook validado com `asaas-access-token` header
-- Endpoint de webhook em rota separada com rate-limit
+### 4. AWS CLI não instalada nas EC2s
+**Erro:** `aws: not found` no SSM command  
+**Causa:** O `user_data` instalava Docker mas não a AWS CLI.  
+**Solução:** Adicionar instalação condicional da AWS CLI no início do comando SSM.
+
+### 5. Loop no Certbot (Nginx ↔ TLS)
+**Problema:** Nginx não subia sem certificado, Certbot não emitia sem Nginx.  
+**Solução:** Subir Nginx com config HTTP temporária → emitir certificado via `--webroot` → restaurar config HTTPS.
+
+### 6. Cache GHA travando o build
+**Problema:** Dois steps gravando `cache-to: type=gha,mode=max` simultaneamente causavam travamento.  
+**Solução:** Remover `cache-to` do segundo step (runtime build).
+
+### 7. Trust policy OIDC com nome errado do repositório
+**Erro:** `Not authorized to perform sts:AssumeRoleWithWebIdentity`  
+**Causa:** `github_repo` estava como `lacrei-devops-challenge` mas o repo era `Challenge-Lacrei`.  
+**Solução:** Atualizar `terraform.tfvars` e aplicar novamente.
 
 ---
 
-## Checklist de segurança
+## Checklist de Segurança
 
-- [x] Nenhuma credencial AWS hardcoded no código ou GitHub Actions
-- [x] GitHub OIDC configurado (tokens temporários por execução)
-- [x] Porta 22 (SSH) nunca aberta no Security Group
-- [x] Acesso às instâncias exclusivamente via SSM
-- [x] Container roda como usuário não-root
-- [x] HTTPS/TLS obrigatório (redirect HTTP → HTTPS)
-- [x] TLSv1.2+ com ciphers seguros (Mozilla Modern)
+- [x] Credenciais AWS via OIDC (tokens temporários, sem chaves permanentes)
+- [x] GitHub Secrets para todos os valores sensíveis
+- [x] SSH bloqueado — acesso via SSM apenas
+- [x] IMDSv2 obrigatório nas EC2s
+- [x] IAM com menor privilégio (roles separadas por função)
+- [x] Security Groups: apenas portas 80 e 443 abertas
+- [x] TLS obrigatório (TLSv1.2+)
 - [x] HSTS habilitado
-- [x] Headers de segurança no Nginx e na aplicação
-- [x] CORS configurado via variável de ambiente
-- [x] ECR com scan automático de vulnerabilidades em cada push
-- [x] IAM com princípio do menor privilégio
-- [x] Logs centralizados no CloudWatch
-- [x] Alertas de infra configurados via SNS
-- [x] Rollback documentado e testável
+- [x] Headers de segurança HTTP
+- [x] EBS criptografado (AES256)
+- [x] ECR com scan automático de vulnerabilidades
+- [x] Container roda como usuário non-root
+- [x] `disable_api_termination=true` em produção
+- [x] State Terraform criptografado no S3
+- [x] `.gitignore` excluindo `*.tfvars` e `.terraform/`
 
 ---
 
-## Erros encontrados e decisões técnicas
+## Proposta de Integração Asaas
 
-| # | Situação | Decisão |
-|---|---|---|
-| 1 | Docker log driver `awslogs` requer que a EC2 Role tenha `logs:CreateLogGroup` | Adicionado `"awslogs-create-group": "true"` no daemon.json e permissão `logs:*` na policy CloudWatchAgentServerPolicy |
-| 2 | SSM `send-command` retorna antes da execução terminar | Implementado polling de status com `get-command-invocation` no pipeline |
-| 3 | Certbot falha se Nginx não estiver respondendo na porta 80 antes da validação | Nginx configurado com rota `.well-known/acme-challenge/` antes de ativar HTTPS |
-| 4 | GitHub Actions OIDC precisa de trust policy com `sub` exato do repositório | Trust policy usa `StringLike` com wildcard `repo:ORG/REPO:*` |
-| 5 | `docker image prune -f` após deploy pode remover imagens de outros containers | Adicionado `--filter "until=24h"` para preservar imagens recentes |
+### Arquitetura proposta
+
+```
+GitHub Actions
+│
+├── Build & Test (incluindo testes de integração mock Asaas)
+│
+└── Deploy
+    └── EC2 com variáveis de ambiente:
+        ASAAS_API_KEY (via AWS Secrets Manager)
+        ASAAS_ENVIRONMENT (sandbox/production)
+```
+
+### Implementação segura
+
+```bash
+# Armazenar a chave no Secrets Manager
+aws secretsmanager create-secret \
+  --name lacrei/asaas-api-key \
+  --secret-string '{"api_key":"$aact_..."}'
+```
+
+```javascript
+// Recuperar na aplicação via SDK AWS
+const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
+const client = new SecretsManagerClient({ region: 'us-east-1' });
+const { SecretString } = await client.send(
+  new GetSecretValueCommand({ SecretId: 'lacrei/asaas-api-key' })
+);
+```
+
+### Boas práticas
+
+- Chave Asaas **nunca** em variáveis de ambiente diretas ou código-fonte
+- Ambiente `sandbox` para staging, `production` para produção
+- Rotação automática da chave via Secrets Manager
+- Logs de transações no CloudWatch com mascaramento de dados sensíveis
