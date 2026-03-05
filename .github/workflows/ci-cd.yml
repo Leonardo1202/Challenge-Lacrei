@@ -183,8 +183,16 @@ jobs:
         run: |
           aws sns publish \
             --topic-arn "${{ secrets.SNS_ALERT_TOPIC_ARN }}" \
-            --subject "Deploy FAILED - ${{ github.ref_name }}" \
-            --message "Pipeline failed for commit ${{ github.sha }}. Actor: ${{ github.actor }}. See: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --region ${{ vars.AWS_REGION }}
+            --subject "🚨 Deploy FAILED - ${{ github.ref_name }}" \
+            --message "🚨 Pipeline FAILED
+
+        Repository: ${{ github.repository }}
+        Branch: ${{ github.ref_name }}
+        Commit: ${{ github.sha }}
+        Actor: ${{ github.actor }}
+
+        Run logs:
+        ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --region "${{ vars.AWS_REGION }}"
 
 # trigger 1772730254
