@@ -64,7 +64,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context:    .
-          target:     test          # Runs tests inside Docker build — fail fast
+          target:     test
           cache-from: type=gha
           cache-to:   type=gha,mode=max
           push:       false
@@ -79,7 +79,6 @@ jobs:
             ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ steps.meta.outputs.image_tag }}
             ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:latest
           cache-from: type=gha
-          cache-to:   type=gha,mode=max
           build-args: |
             APP_VERSION=${{ steps.meta.outputs.image_tag }}
 
