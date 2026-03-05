@@ -66,6 +66,9 @@ jobs:
           echo "$RESPONSE" | grep -q '"status":"ok"'
           docker stop smoke && docker rm smoke
 
+      - name: Test SNS failure
+        run: exit 1
+
   deploy-staging:
     name: Deploy → Staging
     needs: build
