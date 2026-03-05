@@ -121,10 +121,11 @@ jobs:
             --instance-ids "${{ secrets.EC2_INSTANCE_ID_STAGING }}" \
             --document-name "AWS-RunShellScript" \
             --parameters "commands=[
+              'if ! command -v aws &>/dev/null; then curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip && unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install; fi',
               'aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}',
               'docker pull $IMAGE',
               'docker stop lacrei-app || true',
-              'docker rm   lacrei-app || true',
+              'docker rm lacrei-app || true',
               'docker run -d --name lacrei-app --restart unless-stopped -p 3000:3000 -e NODE_ENV=staging -e APP_VERSION=${{ needs.build.outputs.image_tag }} $IMAGE',
               'docker image prune -f'
             ]" \
@@ -135,16 +136,15 @@ jobs:
           CMD_ID=$(cat /tmp/cmd_id.txt)
           echo "SSM Command ID: $CMD_ID"
 
-          # Poll until command completes
-          for i in $(seq 1 20); do
+          for i in $(seq 1 30); do
             STATUS=$(aws ssm get-command-invocation \
               --command-id "$CMD_ID" \
               --instance-id "${{ secrets.EC2_INSTANCE_ID_STAGING }}" \
               --query "Status" --output text 2>/dev/null || echo "Pending")
-            echo "  attempt $i/20 — $STATUS"
+            echo "  attempt $i/30 — $STATUS"
             [[ "$STATUS" == "Success" ]] && break
             [[ "$STATUS" == "Failed"  ]] && echo "❌ SSM command failed" && exit 1
-            sleep 6
+            sleep 10
           done
 
       - name: Smoke test staging
@@ -192,10 +192,11 @@ jobs:
             --instance-ids "${{ secrets.EC2_INSTANCE_ID_PROD }}" \
             --document-name "AWS-RunShellScript" \
             --parameters "commands=[
+              'if ! command -v aws &>/dev/null; then curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip && unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install; fi',
               'aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}',
               'docker pull $IMAGE',
               'docker stop lacrei-app || true',
-              'docker rm   lacrei-app || true',
+              'docker rm lacrei-app || true',
               'docker run -d --name lacrei-app --restart unless-stopped -p 3000:3000 -e NODE_ENV=production -e APP_VERSION=${{ needs.build.outputs.image_tag }} $IMAGE',
               'docker image prune -f'
             ]" \
@@ -205,15 +206,15 @@ jobs:
 
           CMD_ID=$(cat /tmp/cmd_id.txt)
 
-          for i in $(seq 1 20); do
+          for i in $(seq 1 30); do
             STATUS=$(aws ssm get-command-invocation \
               --command-id "$CMD_ID" \
               --instance-id "${{ secrets.EC2_INSTANCE_ID_PROD }}" \
               --query "Status" --output text 2>/dev/null || echo "Pending")
-            echo "  attempt $i/20 — $STATUS"
+            echo "  attempt $i/30 — $STATUS"
             [[ "$STATUS" == "Success" ]] && break
             [[ "$STATUS" == "Failed"  ]] && echo "❌ SSM command failed" && exit 1
-            sleep 6
+            sleep 10
           done
 
       - name: Smoke test production
