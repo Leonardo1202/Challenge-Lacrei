@@ -47,8 +47,8 @@ Pipeline de deploy seguro, escalável e eficiente para ambientes de staging e pr
 ┌─────────────────────────────────────────────────────────────────┐
 │                          AWS                                    │
 │                                                                 │
-│  ECR ──► SSM SendCommand ──► EC2 Staging  (3.219.185.57)         │
-│                         └──► EC2 Produção (34.198.44.244)        │
+│  ECR ──► SSM SendCommand ──► EC2 Staging  (3.219.185.57)        │
+│                         └──► EC2 Produção (34.198.44.244)       │
 │                                                                 │
 │  CloudWatch Logs ◄── Docker (awslogs driver)                    │
 │  CloudWatch Alarms ──► SNS ──► leolima.custodio@hotmail.com     │
