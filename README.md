@@ -28,8 +28,8 @@ Pipeline de deploy seguro, escalável e eficiente para ambientes de staging e pr
 | **Containerização** | Docker multi-stage (test → runtime) |
 | **CI/CD** | GitHub Actions com OIDC (sem chaves permanentes) |
 | **Infra** | Terraform modular — 6 módulos, 36+ recursos AWS |
-| **Staging** | `https://staging.cloudfy.solutions` — EC2 t3.micro |
-| **Produção** | `https://api.cloudfy.solutions` — EC2 t3.small |
+| **Staging** | `http://3.219.185.57` — EC2 t3.micro |
+| **Produção** | `http://34.198.44.244` — EC2 t3.small |
 
 ---
 
@@ -47,8 +47,8 @@ Pipeline de deploy seguro, escalável e eficiente para ambientes de staging e pr
 ┌─────────────────────────────────────────────────────────────────┐
 │                          AWS                                    │
 │                                                                 │
-│  ECR ──► SSM SendCommand ──► EC2 Staging  (98.87.216.68)        │
-│                         └──► EC2 Produção (34.232.41.246)       │
+│  ECR ──► SSM SendCommand ──► EC2 Staging  (3.219.185.57)         │
+│                         └──► EC2 Produção (34.198.44.244)        │
 │                                                                 │
 │  CloudWatch Logs ◄── Docker (awslogs driver)                    │
 │  CloudWatch Alarms ──► SNS ──► leolima.custodio@hotmail.com     │
@@ -108,27 +108,7 @@ terraform plan -out=tfplan.out
 terraform apply tfplan.out
 ```
 
-### 5. Configurar DNS
-
-Após o apply, apontar no Route 53 (ou provedor de domínio):
-
-```
-staging.cloudfy.solutions  →  A  →  <staging_public_ip>
-api.cloudfy.solutions      →  A  →  <production_public_ip>
-```
-
-### 6. Configurar TLS
-
-```bash
-export AWS_REGION=us-east-1
-export EC2_INSTANCE_ID_STAGING=<id>
-export EC2_INSTANCE_ID_PROD=<id>
-
-./infra/scripts/setup-tls.sh staging
-./infra/scripts/setup-tls.sh production
-```
-
-### 7. Configurar GitHub
+### 5. Configurar GitHub
 
 **Secrets** (Settings → Secrets and variables → Actions):
 
@@ -145,8 +125,8 @@ SNS_ALERT_TOPIC_ARN      = arn:aws:sns:us-east-1:<account>:lacrei-alerts
 AWS_REGION    = us-east-1
 ECR_REGISTRY  = <account>.dkr.ecr.us-east-1.amazonaws.com
 ECR_REPO      = lacrei-status-api
-STAGING_URL   = https://staging.cloudfy.solutions
-PROD_URL      = https://api.cloudfy.solutions
+STAGING_URL   = http://3.219.185.57
+PROD_URL      = http://34.198.44.244
 ```
 
 ---
@@ -274,13 +254,6 @@ O pipeline executa o Trivy após o build da imagem Docker:
 - Verifica CVEs de nível **CRITICAL** e **HIGH**
 - Ignora vulnerabilidades sem fix disponível (`ignore-unfixed: true`)
 - Falha o pipeline se qualquer CVE crítico for encontrado
-
-### TLS
-
-- Let's Encrypt com renovação automática a cada 3 horas (cron)
-- TLSv1.2 e TLSv1.3 apenas
-- HSTS: `max-age=63072000; includeSubDomains; preload`
-- Headers de segurança: `X-Frame-Options`, `X-Content-Type-Options`, `X-XSS-Protection`
 
 ### Docker
 
@@ -456,9 +429,7 @@ aws ssm send-command \
 - [x] IMDSv2 obrigatório nas EC2s
 - [x] IAM com menor privilégio (roles separadas por função)
 - [x] Security Groups: apenas portas 80 e 443 abertas
-- [x] TLS obrigatório (TLSv1.2+)
-- [x] HSTS habilitado
-- [x] Headers de segurança HTTP
+- [ ] TLS (requer domínio próprio apontando para os IPs das instâncias)
 - [x] EBS criptografado (AES256)
 - [x] ECR com scan automático de vulnerabilidades
 - [x] Container roda como usuário non-root
