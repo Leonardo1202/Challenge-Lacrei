@@ -210,6 +210,7 @@ jobs:
               --query "Status" --output text 2>/dev/null || echo "Pending")
             [[ "$STATUS" == "Success" ]] && echo "✅ Rollback concluído: ${PREV_TAG}" && break
             [[ "$STATUS" == "Failed"  ]] && echo "❌ Rollback falhou" && exit 1
+            [[ $i -eq 20 ]] && echo "Timeout: rollback SSM did not complete in 3 minutes" && exit 1
             sleep 10
           done
 
@@ -322,6 +323,7 @@ jobs:
               --query "Status" --output text 2>/dev/null || echo "Pending")
             [[ "$STATUS" == "Success" ]] && echo "✅ Rollback concluído: ${PREV_TAG}" && break
             [[ "$STATUS" == "Failed"  ]] && echo "❌ Rollback falhou" && exit 1
+            [[ $i -eq 20 ]] && echo "Timeout: rollback SSM did not complete in 3 minutes" && exit 1
             sleep 10
           done
 
