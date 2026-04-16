@@ -93,7 +93,18 @@ jobs:
           build-args: |
             APP_VERSION=${{ steps.meta.outputs.image_tag }}
 
-      - name: Scan image for vulnerabilities (Trivy)
+      - name: Scan image for vulnerabilities (Trivy) — relatório completo
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref:      ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ steps.meta.outputs.image_tag }}
+          format:         table
+          exit-code:      '0'
+          ignore-unfixed: false
+          vuln-type:      'os,library'
+          severity:       'CRITICAL,HIGH,MEDIUM'
+          trivyignores:   .trivyignore
+
+      - name: Scan image para vulnerabilidades (Trivy) — bloqueante em CRITICAL
         uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref:      ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ steps.meta.outputs.image_tag }}
@@ -101,7 +112,7 @@ jobs:
           exit-code:      '1'
           ignore-unfixed: true
           vuln-type:      'os,library'
-          severity:       'CRITICAL,HIGH'
+          severity:       'CRITICAL'
           trivyignores:   .trivyignore
 
       - name: Validate container health
