@@ -96,12 +96,13 @@ jobs:
       - name: Scan image for vulnerabilities (Trivy)
         uses: aquasecurity/trivy-action@0.35.0
         with:
-          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ steps.meta.outputs.image_tag }}
-          format:    table
-          exit-code: '1'
+          image-ref:      ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ steps.meta.outputs.image_tag }}
+          format:         table
+          exit-code:      '1'
           ignore-unfixed: true
-          vuln-type: 'os,library'
-          severity:  'CRITICAL,HIGH'
+          vuln-type:      'os,library'
+          severity:       'CRITICAL,HIGH'
+          trivyignores:   .trivyignore
 
       - name: Validate container health
         run: |

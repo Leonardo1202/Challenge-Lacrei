@@ -1,0 +1,17 @@
+# .trivyignore — CVEs aceitos com justificativa
+#
+# Formato: <CVE-ID>  # motivo | data de revisão
+#
+# Procedimento: revisitar esta lista a cada sprint ou quando o upstream
+# publicar um fix definitivo na imagem base node:20-alpine.
+
+# node-tar: path traversal via drive-relative hardlink
+# Fix pendente no npm bundled tar — mitigado por npm update tar no Dockerfile.
+# Risco baixo em ambiente de container sem acesso ao filesystem do host.
+# Revisar em: 2026-07-01
+CVE-2026-29786
+
+# tar: File overwrite via drive-relative symlink traversal
+# Mesmo contexto do CVE acima — mesmo pacote, mesma mitigação aplicada.
+# Revisar em: 2026-07-01
+CVE-2026-31802

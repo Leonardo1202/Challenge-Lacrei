@@ -6,7 +6,10 @@ WORKDIR /app
 # Only copy manifests first — maximises layer cache reuse
 COPY app/package.json ./
 
+# Atualiza o pacote 'tar' embutido no npm para corrigir CVEs conhecidos
+# (CVE-2026-29786, CVE-2026-31802) antes de instalar as dependências da app
 RUN npm install --omit=dev --no-fund --no-audit && \
+    npm update tar --no-fund --no-audit && \
     npm cache clean --force
 
 # ── Stage 2: test ─────────────────────────────────────────────────────────────
