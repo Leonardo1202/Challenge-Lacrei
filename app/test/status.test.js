@@ -1,7 +1,7 @@
 'use strict';
 
 // Uses Node.js built-in test runner (v20+) — zero extra dependencies
-const { test, before, after } = require('node:test');
+const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const http   = require('node:http');
 
@@ -9,7 +9,7 @@ process.env.PORT = '3099';
 process.env.NODE_ENV = 'test';
 process.env.APP_VERSION = 'test-build';
 
-const app = require('../index.js');
+require('../index.js'); // inicia o servidor como efeito colateral
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 function get(path) {
