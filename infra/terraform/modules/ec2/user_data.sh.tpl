@@ -77,13 +77,28 @@ systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service 2>/dev/nul
   systemctl enable --now amazon-ssm-agent
 
 echo "==> [6/6] Configurar Nginx inicial (HTTP)"
-cat > /etc/nginx/sites-available/lacrei-app <<NGINX
+cat > /etc/nginx/sites-available/lacrei-app <<'NGINX'
 server {
-    listen 80;
+    listen 80 default_server;
     server_name _;
-    location /.well-known/acme-challenge/ { root /var/www/html; }
-    location /health { proxy_pass http://127.0.0.1:3000/health; access_log off; }
-    location / { proxy_pass http://127.0.0.1:3000; }
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
+    location /health {
+        proxy_pass http://127.0.0.1:3000/health;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        access_log off;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
 }
 NGINX
 
