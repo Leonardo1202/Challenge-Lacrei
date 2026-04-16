@@ -94,7 +94,7 @@ jobs:
             APP_VERSION=${{ steps.meta.outputs.image_tag }}
 
       - name: Scan image for vulnerabilities (Trivy)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.20.0
         with:
           image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ steps.meta.outputs.image_tag }}
           format:    table
@@ -166,6 +166,7 @@ jobs:
             echo "  attempt $i/30 - $STATUS"
             [[ "$STATUS" == "Success" ]] && break
             [[ "$STATUS" == "Failed"  ]] && echo "SSM command failed" && exit 1
+            [[ $i -eq 30 ]] && echo "Timeout: SSM command did not complete in 5 minutes" && exit 1
             sleep 10
           done
 
@@ -277,6 +278,7 @@ jobs:
             echo "  attempt $i/30 - $STATUS"
             [[ "$STATUS" == "Success" ]] && break
             [[ "$STATUS" == "Failed"  ]] && echo "SSM command failed" && exit 1
+            [[ $i -eq 30 ]] && echo "Timeout: SSM command did not complete in 5 minutes" && exit 1
             sleep 10
           done
 
@@ -328,7 +330,9 @@ jobs:
     name: Notify on failure
     needs: [build, deploy-staging, deploy-production]
     runs-on: ubuntu-latest
-    if: failure()
+    # always() garante que o job roda mesmo quando deploy-production é skipped
+    # (ex: push em develop). failure() verifica se algum job anterior falhou.
+    if: always() && contains(needs.*.result, 'failure')
     steps:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4

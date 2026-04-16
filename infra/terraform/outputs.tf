@@ -38,6 +38,11 @@ output "sns_topic_arn" {
   value       = module.sns.topic_arn
 }
 
+output "cloudwatch_dashboard_url" {
+  description = "URL do dashboard CloudWatch lacrei-overview"
+  value       = module.cloudwatch.dashboard_url
+}
+
 output "next_steps" {
   description = "Checklist pós-apply"
   value = <<-EOT

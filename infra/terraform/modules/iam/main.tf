@@ -76,6 +76,19 @@ data "aws_iam_policy_document" "github_actions_perms" {
   }
 
   statement {
+    sid    = "SSMParameterStore"
+    effect = "Allow"
+    actions = [
+      "ssm:GetParameter",
+      "ssm:PutParameter",
+    ]
+    # Escopo restrito ao namespace /lacrei/ para seguir o menor privilégio
+    resources = [
+      "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/lacrei/*",
+    ]
+  }
+
+  statement {
     sid       = "SNSPublish"
     effect    = "Allow"
     actions   = ["sns:Publish"]
