@@ -6,12 +6,15 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
-    "test": "node --test test/status.test.js"
+    "test": "node --test test/status.test.js",
+    "lint": "eslint ."
   },
   "dependencies": {
     "express": "^4.19.2"
   },
-  "devDependencies": {},
+  "devDependencies": {
+    "eslint": "^8.57.0"
+  },
   "engines": {
     "node": ">=20"
   }

@@ -1,10 +1,15 @@
 name: CI/CD Pipeline
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Estratégia de branches:
+#   develop → lint + build + deploy staging apenas
+#   main    → lint + build + deploy staging → deploy production
+# ──────────────────────────────────────────────────────────────────────────────
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 concurrency:
   group: deploy-${{ github.ref }}
@@ -21,8 +26,34 @@ permissions:
 
 jobs:
 
+  # ── 1. Lint ─────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: app/package.json
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm install
+
+      - name: Run ESLint
+        working-directory: app
+        run: npm run lint
+
+  # ── 2. Build, test & security scan ──────────────────────────────────────────
   build:
     name: Build & Test
+    needs: lint
     runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.meta.outputs.image_tag }}
@@ -62,6 +93,16 @@ jobs:
           build-args: |
             APP_VERSION=${{ steps.meta.outputs.image_tag }}
 
+      - name: Scan image for vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ steps.meta.outputs.image_tag }}
+          format:    table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity:  'CRITICAL,HIGH'
+
       - name: Validate container health
         run: |
           IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ steps.meta.outputs.image_tag }}"
@@ -72,11 +113,12 @@ jobs:
           echo "$RESPONSE" | grep -q '"status":"ok"'
           docker stop smoke && docker rm smoke
 
+  # ── 3. Deploy → Staging ─────────────────────────────────────────────────────
   deploy-staging:
     name: Deploy → Staging
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push'
     environment:
       name: staging
       url:  ${{ vars.STAGING_URL }}
@@ -88,11 +130,24 @@ jobs:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region:     ${{ env.AWS_REGION }}
 
+      - name: Save previous image tag for rollback
+        id: prev
+        run: |
+          PREV=$(aws ssm get-parameter \
+            --name "/lacrei/staging/current_image_tag" \
+            --query "Parameter.Value" --output text 2>/dev/null || echo "none")
+          echo "tag=${PREV}" >> "$GITHUB_OUTPUT"
+          echo "Previous staging tag: ${PREV}"
+
       - name: Deploy to Staging via SSM
+        id: deploy
         run: |
           IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ needs.build.outputs.image_tag }}"
           echo "Deploying $IMAGE to STAGING"
-          CMD_ID=$(aws ssm send-command             --instance-ids "${{ secrets.EC2_INSTANCE_ID_STAGING }}"             --document-name "AWS-RunShellScript"             --parameters "commands=[
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "${{ secrets.EC2_INSTANCE_ID_STAGING }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[
               'if ! command -v aws &>/dev/null; then curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip && unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install; fi',
               'aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}',
               'docker pull $IMAGE',
@@ -100,10 +155,14 @@ jobs:
               'docker rm lacrei-app || true',
               'docker run -d --name lacrei-app --restart unless-stopped -p 3000:3000 -e NODE_ENV=staging -e APP_VERSION=${{ needs.build.outputs.image_tag }} $IMAGE',
               'docker image prune -f'
-            ]"             --output text --query "Command.CommandId")
+            ]" \
+            --output text --query "Command.CommandId")
           echo "SSM Command ID: $CMD_ID"
           for i in $(seq 1 30); do
-            STATUS=$(aws ssm get-command-invocation               --command-id "$CMD_ID"               --instance-id "${{ secrets.EC2_INSTANCE_ID_STAGING }}"               --query "Status" --output text 2>/dev/null || echo "Pending")
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "${{ secrets.EC2_INSTANCE_ID_STAGING }}" \
+              --query "Status" --output text 2>/dev/null || echo "Pending")
             echo "  attempt $i/30 - $STATUS"
             [[ "$STATUS" == "Success" ]] && break
             [[ "$STATUS" == "Failed"  ]] && echo "SSM command failed" && exit 1
@@ -111,16 +170,54 @@ jobs:
           done
 
       - name: Smoke test staging
+        id: smoke
         run: |
           sleep 10
           RESPONSE=$(curl -sf "${{ vars.STAGING_URL }}/status")
           echo "✅ Staging: $RESPONSE"
           echo "$RESPONSE" | grep -q '"status":"ok"'
 
+      - name: Register current image tag in SSM
+        if: success()
+        run: |
+          aws ssm put-parameter \
+            --name "/lacrei/staging/current_image_tag" \
+            --value "${{ needs.build.outputs.image_tag }}" \
+            --type String --overwrite
+
+      - name: Automated rollback on failure
+        if: failure() && steps.prev.outputs.tag != 'none'
+        run: |
+          PREV_TAG="${{ steps.prev.outputs.tag }}"
+          IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${PREV_TAG}"
+          echo "🔄 Staging smoke test failed — rolling back to ${PREV_TAG}"
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "${{ secrets.EC2_INSTANCE_ID_STAGING }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[
+              'aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}',
+              'docker pull $IMAGE',
+              'docker stop lacrei-app || true',
+              'docker rm lacrei-app || true',
+              'docker run -d --name lacrei-app --restart unless-stopped -p 3000:3000 -e NODE_ENV=staging -e APP_VERSION=${PREV_TAG} $IMAGE'
+            ]" \
+            --output text --query "Command.CommandId")
+          for i in $(seq 1 20); do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "${{ secrets.EC2_INSTANCE_ID_STAGING }}" \
+              --query "Status" --output text 2>/dev/null || echo "Pending")
+            [[ "$STATUS" == "Success" ]] && echo "✅ Rollback concluído: ${PREV_TAG}" && break
+            [[ "$STATUS" == "Failed"  ]] && echo "❌ Rollback falhou" && exit 1
+            sleep 10
+          done
+
+  # ── 4. Deploy → Production ─────────────────────────────────────────────────
   deploy-production:
     name: Deploy → Production
     needs: [build, deploy-staging]
     runs-on: ubuntu-latest
+    # Produção somente via branch main
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment:
       name: production
@@ -133,16 +230,35 @@ jobs:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region:     ${{ env.AWS_REGION }}
 
+      - name: Save previous image tag for rollback
+        id: prev
+        run: |
+          PREV=$(aws ssm get-parameter \
+            --name "/lacrei/production/current_image_tag" \
+            --query "Parameter.Value" --output text 2>/dev/null || echo "none")
+          echo "tag=${PREV}" >> "$GITHUB_OUTPUT"
+          echo "Previous production tag: ${PREV}"
+
       - name: Tag image as stable
         run: |
-          MANIFEST=$(aws ecr batch-get-image             --repository-name "${{ env.ECR_REPO }}"             --image-ids imageTag=${{ needs.build.outputs.image_tag }}             --query 'images[0].imageManifest' --output text)
-          aws ecr put-image             --repository-name "${{ env.ECR_REPO }}"             --image-tag stable             --image-manifest "$MANIFEST"
+          MANIFEST=$(aws ecr batch-get-image \
+            --repository-name "${{ env.ECR_REPO }}" \
+            --image-ids imageTag=${{ needs.build.outputs.image_tag }} \
+            --query 'images[0].imageManifest' --output text)
+          aws ecr put-image \
+            --repository-name "${{ env.ECR_REPO }}" \
+            --image-tag stable \
+            --image-manifest "$MANIFEST"
 
       - name: Deploy to Production via SSM
+        id: deploy
         run: |
           IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ needs.build.outputs.image_tag }}"
           echo "Deploying $IMAGE to PRODUCTION"
-          CMD_ID=$(aws ssm send-command             --instance-ids "${{ secrets.EC2_INSTANCE_ID_PROD }}"             --document-name "AWS-RunShellScript"             --parameters "commands=[
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "${{ secrets.EC2_INSTANCE_ID_PROD }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[
               'if ! command -v aws &>/dev/null; then curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip && unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install; fi',
               'aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}',
               'docker pull $IMAGE',
@@ -150,10 +266,14 @@ jobs:
               'docker rm lacrei-app || true',
               'docker run -d --name lacrei-app --restart unless-stopped -p 3000:3000 -e NODE_ENV=production -e APP_VERSION=${{ needs.build.outputs.image_tag }} $IMAGE',
               'docker image prune -f'
-            ]"             --output text --query "Command.CommandId")
+            ]" \
+            --output text --query "Command.CommandId")
           echo "SSM Command ID: $CMD_ID"
           for i in $(seq 1 30); do
-            STATUS=$(aws ssm get-command-invocation               --command-id "$CMD_ID"               --instance-id "${{ secrets.EC2_INSTANCE_ID_PROD }}"               --query "Status" --output text 2>/dev/null || echo "Pending")
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "${{ secrets.EC2_INSTANCE_ID_PROD }}" \
+              --query "Status" --output text 2>/dev/null || echo "Pending")
             echo "  attempt $i/30 - $STATUS"
             [[ "$STATUS" == "Success" ]] && break
             [[ "$STATUS" == "Failed"  ]] && echo "SSM command failed" && exit 1
@@ -161,12 +281,49 @@ jobs:
           done
 
       - name: Smoke test production
+        id: smoke
         run: |
           sleep 10
           RESPONSE=$(curl -sf "${{ vars.PROD_URL }}/status")
           echo "✅ Production: $RESPONSE"
           echo "$RESPONSE" | grep -q '"status":"ok"'
 
+      - name: Register current image tag in SSM
+        if: success()
+        run: |
+          aws ssm put-parameter \
+            --name "/lacrei/production/current_image_tag" \
+            --value "${{ needs.build.outputs.image_tag }}" \
+            --type String --overwrite
+
+      - name: Automated rollback on failure
+        if: failure() && steps.prev.outputs.tag != 'none'
+        run: |
+          PREV_TAG="${{ steps.prev.outputs.tag }}"
+          IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${PREV_TAG}"
+          echo "🔄 Production smoke test failed — rolling back to ${PREV_TAG}"
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "${{ secrets.EC2_INSTANCE_ID_PROD }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[
+              'aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}',
+              'docker pull $IMAGE',
+              'docker stop lacrei-app || true',
+              'docker rm lacrei-app || true',
+              'docker run -d --name lacrei-app --restart unless-stopped -p 3000:3000 -e NODE_ENV=production -e APP_VERSION=${PREV_TAG} $IMAGE'
+            ]" \
+            --output text --query "Command.CommandId")
+          for i in $(seq 1 20); do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "${{ secrets.EC2_INSTANCE_ID_PROD }}" \
+              --query "Status" --output text 2>/dev/null || echo "Pending")
+            [[ "$STATUS" == "Success" ]] && echo "✅ Rollback concluído: ${PREV_TAG}" && break
+            [[ "$STATUS" == "Failed"  ]] && echo "❌ Rollback falhou" && exit 1
+            sleep 10
+          done
+
+  # ── 5. Notify on failure ────────────────────────────────────────────────────
   notify-failure:
     name: Notify on failure
     needs: [build, deploy-staging, deploy-production]
@@ -181,4 +338,8 @@ jobs:
 
       - name: Send SNS alert
         run: |
-          aws sns publish             --topic-arn "${{ secrets.SNS_ALERT_TOPIC_ARN }}"             --subject "Deploy FAILED - ${{ github.ref_name }}"             --message "Pipeline failed for commit ${{ github.sha }}. Actor: ${{ github.actor }}. See: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"             --region ${{ vars.AWS_REGION }}
+          aws sns publish \
+            --topic-arn "${{ secrets.SNS_ALERT_TOPIC_ARN }}" \
+            --subject "Deploy FAILED - ${{ github.ref_name }}" \
+            --message "Pipeline failed for commit ${{ github.sha }}. Actor: ${{ github.actor }}. See: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --region ${{ vars.AWS_REGION }}

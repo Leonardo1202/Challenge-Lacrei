@@ -1,19 +1,16 @@
-# Challenge-Lacrei
-
-
-
 # Lacrei Saúde — DevOps Challenge
 
 Pipeline de deploy seguro, escalável e eficiente para ambientes de staging e produção na AWS.
 
 ---
 
-## 📋 Índice
+## Índice
 
 - [Visão Geral](#visão-geral)
 - [Arquitetura](#arquitetura)
 - [Setup dos Ambientes](#setup-dos-ambientes)
 - [Fluxo CI/CD](#fluxo-cicd)
+- [Separação de Ambientes](#separação-de-ambientes)
 - [Segurança](#segurança)
 - [Observabilidade](#observabilidade)
 - [Rollback](#rollback)
@@ -30,7 +27,7 @@ Pipeline de deploy seguro, escalável e eficiente para ambientes de staging e pr
 | **Aplicação** | API Node.js com rotas `/status` e `/health` |
 | **Containerização** | Docker multi-stage (test → runtime) |
 | **CI/CD** | GitHub Actions com OIDC (sem chaves permanentes) |
-| **Infra** | Terraform modular — 6 módulos, 36 recursos AWS |
+| **Infra** | Terraform modular — 6 módulos, 36+ recursos AWS |
 | **Staging** | `https://staging.cloudfy.solutions` — EC2 t3.micro |
 | **Produção** | `https://api.cloudfy.solutions` — EC2 t3.small |
 
@@ -42,8 +39,8 @@ Pipeline de deploy seguro, escalável e eficiente para ambientes de staging e pr
 ┌─────────────────────────────────────────────────────────────────┐
 │                        GitHub Actions                           │
 │                                                                 │
-│  push main ──► Build & Test ──► Deploy Staging                  │
-│  tag v*.*.* ──► Build & Test ──► Deploy Production              │
+│  push develop ──► Lint ──► Build & Scan ──► Deploy Staging      │
+│  push main    ──► Lint ──► Build & Scan ──► Staging ──► Prod    │
 └────────────────────────┬────────────────────────────────────────┘
                          │ OIDC (sem chaves)
                          ▼
@@ -55,6 +52,7 @@ Pipeline de deploy seguro, escalável e eficiente para ambientes de staging e pr
 │                                                                 │
 │  CloudWatch Logs ◄── Docker (awslogs driver)                    │
 │  CloudWatch Alarms ──► SNS ──► leolima.custodio@hotmail.com     │
+│  CloudWatch Dashboard ──► lacrei-overview                       │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -66,7 +64,7 @@ Pipeline de deploy seguro, escalável e eficiente para ambientes de staging e pr
 | **EC2** | 2 instâncias + Elastic IP + Security Groups |
 | **ECR** | Repositório privado + lifecycle policy |
 | **IAM** | GitHub OIDC role + EC2 role + instance profile |
-| **CloudWatch** | 6 log groups + 6 alarmes |
+| **CloudWatch** | 6 log groups + 9 alarmes + 2 filtros de métrica + 1 dashboard |
 | **SNS** | Tópico de alertas + subscription email |
 
 ---
@@ -153,10 +151,49 @@ PROD_URL      = https://api.cloudfy.solutions
 
 ---
 
+## Separação de Ambientes
+
+A separação entre staging e produção é feita em duas camadas:
+
+### Branches
+
+| Branch | Ambientes atingidos |
+|---|---|
+| `develop` | Somente **staging** |
+| `main` | **Staging** → aprovação → **Produção** |
+
+O fluxo de trabalho esperado:
+
+```
+feature/xxx ──► develop ──► staging (validação)
+                    └──► PR ──► main ──► staging ──► produção
+```
+
+### Infraestrutura
+
+| Recurso | Staging | Produção |
+|---|---|---|
+| Instância EC2 | t3.micro | t3.small |
+| `disable_api_termination` | false | **true** |
+| NODE_ENV | staging | production |
+| ECR tag | sha-\<commit\> | sha-\<commit\> + **stable** |
+
+### Proteção do ambiente de produção
+
+O job `deploy-production` está associado ao environment `production` no GitHub Actions. Configure em **Settings → Environments → production**:
+
+- **Required reviewers**: defina aprovadores obrigatórios antes do deploy
+- **Wait timer**: tempo de espera adicional após aprovação
+
+---
+
 ## Fluxo CI/CD
 
 ```
-push → main
+push → develop ou main
+│
+├── Lint
+│   └── ESLint no código da aplicação (falha bloqueia o pipeline)
 │
 ├── Build & Test
 │   ├── Checkout
@@ -164,23 +201,30 @@ push → main
 │   ├── Login ECR
 │   ├── Build imagem Docker (stage: runtime)
 │   │   └── Testes rodando dentro do build (stage: test)
-│   └── Push para ECR com tag sha-<commit>
+│   ├── Push para ECR com tag sha-<commit>
+│   ├── Trivy — scan de vulnerabilidades CRITICAL/HIGH
+│   │   └── Falha bloqueia o pipeline se houver CVEs críticos
+│   └── Smoke test local: GET /status → {"status":"ok"}
 │
-└── Deploy → Staging
-    ├── Configure AWS (OIDC)
+└── Deploy → Staging (develop e main)
+    ├── Salva tag atual no SSM (para rollback)
     ├── SSM SendCommand → EC2 Staging
-    │   ├── aws ecr get-login-password | docker login
     │   ├── docker pull <imagem>
     │   ├── docker stop/rm lacrei-app
     │   └── docker run lacrei-app
-    └── Smoke test: GET /status → {"status":"ok"}
+    ├── Smoke test: GET /status → {"status":"ok"}
+    ├── [sucesso] Registra nova tag no SSM
+    └── [falha]  Rollback automático para versão anterior
 
 
-push → tag v*.*.*
-│
-└── Build & Test
-    └── Deploy → Production (mesma lógica do staging)
-        └── Smoke test: GET /status → {"status":"ok"}
+push → main (apenas)
+└── Deploy → Production (após staging aprovado)
+    ├── Salva tag atual no SSM (para rollback)
+    ├── Tag da imagem como "stable" no ECR
+    ├── SSM SendCommand → EC2 Production
+    ├── Smoke test: GET /status → {"status":"ok"}
+    ├── [sucesso] Registra nova tag no SSM
+    └── [falha]  Rollback automático para versão anterior
 ```
 
 ### Testes automatizados no build
@@ -214,6 +258,7 @@ A role do GitHub Actions tem permissões mínimas:
 - `ecr:GetAuthorizationToken` — autenticação ECR
 - `ecr:BatchCheckLayerAvailability`, `ecr:PutImage`, etc. — push de imagem
 - `ssm:SendCommand`, `ssm:GetCommandInvocation` — deploy via SSM
+- `ssm:PutParameter`, `ssm:GetParameter` — registro de versão para rollback
 - `sns:Publish` — alertas de falha
 
 ### EC2 — Sem SSH exposto
@@ -221,6 +266,14 @@ A role do GitHub Actions tem permissões mínimas:
 - Porta 22 **bloqueada** no Security Group
 - Acesso exclusivo via **AWS Systems Manager (SSM)**
 - IMDSv2 obrigatório (proteção contra SSRF)
+
+### Scan de vulnerabilidades (Trivy)
+
+O pipeline executa o Trivy após o build da imagem Docker:
+
+- Verifica CVEs de nível **CRITICAL** e **HIGH**
+- Ignora vulnerabilidades sem fix disponível (`ignore-unfixed: true`)
+- Falha o pipeline se qualquer CVE crítico for encontrado
 
 ### TLS
 
@@ -260,8 +313,26 @@ A role do GitHub Actions tem permissões mínimas:
 | Memória Production | > 85% por 10min | SNS |
 | Disco Staging | > 80% por 10min | SNS |
 | Disco Production | > 80% por 10min | SNS |
+| HTTP 5xx Staging | > 10 erros/min | SNS |
+| HTTP 5xx Production | > 10 erros/min | SNS |
+| Disponibilidade HTTP Staging | sem requests por 10min | SNS |
+| Disponibilidade HTTP Production | sem requests por 10min | SNS |
 
-### Acessar logs
+### Dashboard CloudWatch
+
+Após o `terraform apply`, um dashboard **lacrei-overview** é criado automaticamente com:
+
+- Gráficos de CPU e memória (staging e produção)
+- Contador de erros HTTP 5xx
+- Status visual de todos os alarmes
+- Queries de logs em tempo real
+
+```bash
+# URL do dashboard (retornada como output do Terraform)
+terraform output -raw cloudwatch_dashboard_url
+```
+
+### Acessar logs via CLI
 
 ```bash
 # Logs da aplicação em tempo real
@@ -269,23 +340,55 @@ aws logs tail /lacrei/staging/app --follow --region us-east-1
 
 # Logs do Nginx
 aws logs tail /lacrei/staging/nginx-access --follow --region us-east-1
+
+# Buscar erros nas últimas 2 horas
+aws logs filter-log-events \
+  --log-group-name /lacrei/production/app \
+  --filter-pattern "ERROR" \
+  --start-time $(date -d '2 hours ago' +%s000) \
+  --region us-east-1
 ```
 
 ---
 
 ## Rollback
 
-### Rollback automático via script
+### Estratégia de tags ECR
+
+| Tag | Significado |
+|---|---|
+| `sha-<commit>` | Imagem de cada commit (mantidas por 10 releases) |
+| `latest` | Última imagem buildada |
+| `stable` | Última imagem promovida para produção |
+
+### Rollback automático (pipeline)
+
+Se o smoke test falhar após o deploy, o pipeline executa rollback **automaticamente** para a versão anterior registrada no AWS SSM Parameter Store:
+
+```
+/lacrei/staging/current_image_tag    ← versão atual em staging
+/lacrei/production/current_image_tag ← versão atual em produção
+```
+
+### Rollback manual via script
 
 ```bash
-# Rollback para a versão anterior no staging
+export AWS_REGION=us-east-1
+export ECR_REGISTRY=<account>.dkr.ecr.us-east-1.amazonaws.com
+export ECR_REPO=lacrei-status-api
+export EC2_INSTANCE_ID_STAGING=i-xxxx
+export EC2_INSTANCE_ID_PROD=i-xxxx
+
+# Rollback para a versão anterior (automático)
 ./infra/scripts/rollback.sh staging
+./infra/scripts/rollback.sh production
 
 # Rollback para uma versão específica
 ./infra/scripts/rollback.sh staging sha-abc1234
+./infra/scripts/rollback.sh production sha-abc1234
 ```
 
-### Rollback manual
+### Rollback manual sem script
 
 ```bash
 # 1. Listar imagens disponíveis no ECR
@@ -308,45 +411,39 @@ aws ssm send-command \
   ]"
 ```
 
-### Estratégia de tags ECR
-
-- `sha-<commit>` — imagem de cada commit (mantidas por 10 releases)
-- `latest` — última imagem deployada
-- `stable` — última imagem promovida para produção
-
 ---
 
 ## Erros Encontrados e Decisões
 
 ### 1. OIDC Provider já existia na conta
-**Erro:** `EntityAlreadyExists: Provider with url https://token.actions.githubusercontent.com already exists`  
+**Erro:** `EntityAlreadyExists: Provider with url https://token.actions.githubusercontent.com already exists`
 **Solução:** Importar o provider existente com `terraform import`.
 
 ### 2. Caracteres especiais em descriptions IAM/EC2
-**Erro:** `ValidationError: Member must satisfy regular expression pattern`  
-**Causa:** Caracteres como `—` (em dash) e `ã` não são aceitos pela AWS API.  
+**Erro:** `ValidationError: Member must satisfy regular expression pattern`
+**Causa:** Caracteres como `—` (em dash) e `ã` não são aceitos pela AWS API.
 **Solução:** Substituir por `-` e remover acentos nas descriptions.
 
 ### 3. Limite de VPCs atingido
-**Erro:** `VpcLimitExceeded: The maximum number of VPCs has been reached`  
+**Erro:** `VpcLimitExceeded: The maximum number of VPCs has been reached`
 **Solução:** Deletar VPCs não utilizadas na conta. Alternativa: solicitar aumento de limite via Service Quotas.
 
 ### 4. AWS CLI não instalada nas EC2s
-**Erro:** `aws: not found` no SSM command  
-**Causa:** O `user_data` instalava Docker mas não a AWS CLI.  
+**Erro:** `aws: not found` no SSM command
+**Causa:** O `user_data` instalava Docker mas não a AWS CLI.
 **Solução:** Adicionar instalação condicional da AWS CLI no início do comando SSM.
 
 ### 5. Loop no Certbot (Nginx ↔ TLS)
-**Problema:** Nginx não subia sem certificado, Certbot não emitia sem Nginx.  
+**Problema:** Nginx não subia sem certificado, Certbot não emitia sem Nginx.
 **Solução:** Subir Nginx com config HTTP temporária → emitir certificado via `--webroot` → restaurar config HTTPS.
 
 ### 6. Cache GHA travando o build
-**Problema:** Dois steps gravando `cache-to: type=gha,mode=max` simultaneamente causavam travamento.  
+**Problema:** Dois steps gravando `cache-to: type=gha,mode=max` simultaneamente causavam travamento.
 **Solução:** Remover `cache-to` do segundo step (runtime build).
 
 ### 7. Trust policy OIDC com nome errado do repositório
-**Erro:** `Not authorized to perform sts:AssumeRoleWithWebIdentity`  
-**Causa:** `github_repo` estava como `lacrei-devops-challenge` mas o repo era `Challenge-Lacrei`.  
+**Erro:** `Not authorized to perform sts:AssumeRoleWithWebIdentity`
+**Causa:** `github_repo` estava como `lacrei-devops-challenge` mas o repo era `Challenge-Lacrei`.
 **Solução:** Atualizar `terraform.tfvars` e aplicar novamente.
 
 ---
@@ -368,6 +465,9 @@ aws ssm send-command \
 - [x] `disable_api_termination=true` em produção
 - [x] State Terraform criptografado no S3
 - [x] `.gitignore` excluindo `*.tfvars` e `.terraform/`
+- [x] Trivy scan de imagem Docker no pipeline (CRITICAL/HIGH bloqueantes)
+- [x] ESLint no pipeline (erros de lint bloqueiam o build)
+- [x] Rollback automático integrado ao pipeline
 
 ---
 
