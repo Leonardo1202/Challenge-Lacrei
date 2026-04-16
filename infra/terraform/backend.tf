@@ -9,7 +9,7 @@ terraform {
   }
 
   backend "s3" {
-    bucket         = "lacrei-tfstate"
+    bucket         = "lacrei-tfstate-149146127395"
     key            = "lacrei-devops/terraform.tfstate"
     region         = "us-east-1"
     encrypt        = true

@@ -138,21 +138,24 @@ resource "aws_cloudwatch_dashboard" "lacrei" {
 
   dashboard_body = jsonencode({
     widgets = [
-      # ── Título ──────────────────────────────────────────────────────────────
       {
         type   = "text"
-        x      = 0; y = 0; width = 24; height = 1
+        x      = 0
+        y      = 0
+        width  = 24
+        height = 1
         properties = {
-          markdown = "## Lacrei Saúde — Overview de Infraestrutura"
+          markdown = "## Lacrei Saude - Overview de Infraestrutura"
         }
       },
-
-      # ── CPU Staging ─────────────────────────────────────────────────────────
       {
         type   = "metric"
-        x      = 0; y = 1; width = 8; height = 6
+        x      = 0
+        y      = 1
+        width  = 8
+        height = 6
         properties = {
-          title  = "CPU — Staging"
+          title  = "CPU - Staging"
           region = var.aws_region
           metrics = [[
             "Lacrei/staging", "cpu_usage_user",
@@ -166,13 +169,14 @@ resource "aws_cloudwatch_dashboard" "lacrei" {
           }
         }
       },
-
-      # ── CPU Production ──────────────────────────────────────────────────────
       {
         type   = "metric"
-        x      = 8; y = 1; width = 8; height = 6
+        x      = 8
+        y      = 1
+        width  = 8
+        height = 6
         properties = {
-          title  = "CPU — Production"
+          title  = "CPU - Production"
           region = var.aws_region
           metrics = [[
             "Lacrei/production", "cpu_usage_user",
@@ -186,13 +190,14 @@ resource "aws_cloudwatch_dashboard" "lacrei" {
           }
         }
       },
-
-      # ── Memória Production ──────────────────────────────────────────────────
       {
         type   = "metric"
-        x      = 16; y = 1; width = 8; height = 6
+        x      = 16
+        y      = 1
+        width  = 8
+        height = 6
         properties = {
-          title  = "Memoria — Production"
+          title  = "Memoria - Production"
           region = var.aws_region
           metrics = [[
             "Lacrei/production", "mem_used_percent",
@@ -206,11 +211,12 @@ resource "aws_cloudwatch_dashboard" "lacrei" {
           }
         }
       },
-
-      # ── Erros HTTP 5xx ──────────────────────────────────────────────────────
       {
         type   = "metric"
-        x      = 0; y = 7; width = 12; height = 6
+        x      = 0
+        y      = 7
+        width  = 12
+        height = 6
         properties = {
           title  = "Erros HTTP 5xx"
           region = var.aws_region
@@ -224,38 +230,42 @@ resource "aws_cloudwatch_dashboard" "lacrei" {
           }
         }
       },
-
-      # ── Status dos Alarmes ──────────────────────────────────────────────────
       {
         type   = "alarm"
-        x      = 12; y = 7; width = 12; height = 6
+        x      = 12
+        y      = 7
+        width  = 12
+        height = 6
         properties = {
           title  = "Status dos Alarmes"
-          alarms = [for k, v in aws_cloudwatch_metric_alarm.app : v.alarm_arn]
+          alarms = [for k, v in aws_cloudwatch_metric_alarm.app : v.arn]
+        }
+      },
+      {
+        type   = "log"
+        x      = 0
+        y      = 13
+        width  = 12
+        height = 6
+        properties = {
+          title  = "App Logs - Staging (ultimos 15min)"
+          region = var.aws_region
+          query  = "SOURCE '/lacrei/staging/app' | fields @timestamp, @message | sort @timestamp desc | limit 50"
+          view   = "table"
         }
       },
 
-      # ── Logs da aplicação — Staging ─────────────────────────────────────────
       {
         type   = "log"
-        x      = 0; y = 13; width = 12; height = 6
+        x      = 12
+        y      = 13
+        width  = 12
+        height = 6
         properties = {
-          title   = "App Logs — Staging (ultimos 15min)"
-          region  = var.aws_region
-          query   = "SOURCE '/lacrei/staging/app' | fields @timestamp, @message | sort @timestamp desc | limit 50"
-          view    = "table"
-        }
-      },
-
-      # ── Logs da aplicação — Production ─────────────────────────────────────
-      {
-        type   = "log"
-        x      = 12; y = 13; width = 12; height = 6
-        properties = {
-          title   = "App Logs — Production (ultimos 15min)"
-          region  = var.aws_region
-          query   = "SOURCE '/lacrei/production/app' | fields @timestamp, @message | sort @timestamp desc | limit 50"
-          view    = "table"
+          title  = "App Logs - Production (ultimos 15min)"
+          region = var.aws_region
+          query  = "SOURCE '/lacrei/production/app' | fields @timestamp, @message | sort @timestamp desc | limit 50"
+          view   = "table"
         }
       }
     ]

@@ -7,7 +7,8 @@
 set -euo pipefail
 
 AWS_REGION="${AWS_REGION:-us-east-1}"
-BUCKET_NAME="lacrei-tfstate"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+BUCKET_NAME="lacrei-tfstate-${ACCOUNT_ID}"
 DYNAMO_TABLE="lacrei-tflock"
 
 echo "🚀 Bootstrapping Terraform remote state"
